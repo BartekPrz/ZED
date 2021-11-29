@@ -1,1 +1,1 @@
-# ZED
+# Projekt z analizy danych w języku R
