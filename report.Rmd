@@ -1,0 +1,461 @@
+---
+title: "Raport - analiza danych Banku Światowego"
+author: "Bartosz Przybył"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Executive Summary
+
+# Wykorzystane biblioteki
+```{r libraries, message = FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(kableExtra)
+library(zoo)
+library(plotly)
+library(gganimate)
+```
+
+# Wstępne przetwarzanie zbioru danych
+
+## Zapewnienie powtarzalności wyników
+Aby zapewnić powtarzalność otrzymywanych wyników przy każdym uruchomieniu na dostarczonych danych na samym wstępie określone zostało ziarno przetwarzania jako stała, całkowitoliczbowa wartość.
+
+```{r seed}
+set.seed(42)
+```
+
+## Odczyt danych
+W ramach analizy został dostarczony główny zbiór danych stworzony przez Bank Światowy, który zawieraja informacje o możliwościach gospodarczych i rozwoju poszczególnych krajów mierzonym przez ponad 100 statystyk. Oprócz tego, w ramach projektu zostały zebrane informacje o kursach wymiany walut, cenach złota, obrocie bitcoinem oraz miesięcznych wynikach S&P Composite.
+
+```{r data_read}
+indicators_col_names <- c("Country Name", "Country Code", "Series Name", "Series Code", 1970:2020)
+indicators_df <- read_xlsx("World_Development_Indicators.xlsx", n_max = 44305, skip = 1, col_names = indicators_col_names)
+
+gold_prices_df <- read.csv("Gold prices.csv")
+bc_prices_df <- read.csv("Bitcoin/BCHAIN-MKPRU.csv")
+composite_prices_df <- read.csv("S&P Composite.csv")
+```
+
+```{r}
+dim(indicators_df)
+```
+
+Główny, surowy zbiór danych "World_Development_Indicators" wstępnie zawiera 44304 wiersze oraz 55 kolumn. W kolejnym kroku wspomniany zbiór danych zostanie odpowiednio wyczyszczony w celach dalszej analizy.
+
+## Czyszczenie i transformacja wejściowych zbiorów danych
+
+Prezentowana sekcja obejmuje czyszczenie i transformację wejściowych zbiorów danych.
+
+### World Development Indicators
+Na wstępie spójrzmy na strukturę interesującego nas zbioru danych:
+
+```{r}
+head(indicators_df[, 1:7])
+```
+
+Jak możemy zauważyć mamy tutaj 4 kolumny, które opisują nasze obserwacje (Country Name, Country Code, Series Name, Series Code) oraz pozostałe 51 kolumn, które przechowują wartości odnotowywane dla danej obserwacji w kolejnych latach.
+
+Chcemy oczyścić nasz zbiór danych, dlatego w pierwszym kroku pozbędziemy się kolumn "Country Name" oraz "Series Name", które nie niosą żadnych dodatkowych informacji, które będą wymagane w dalszej fazie analizy - wartości dla tych kolumn są odpowiednio odwzorowywane przez kolumny "Country Code" oraz "Series Code"
+
+```{r}
+clean_indicators_df <- indicators_df[,c("Country Code", "Series Code", 1970:2020)]
+```
+
+Kolejnym krokiem będzie zamiana wartości "..", które zostały odczytane z dostarczonego pliku na wartości puste - "NA". W ten sposób ułatwimy sobie dalszą analizę zbioru
+
+```{r}
+clean_indicators_df[clean_indicators_df == ".."] <- NA
+```
+
+Następnie dokonamy transformacji naszego zbioru danych z wykorzystaniem dplyr'a:
+
+* Kolumna z etykietami zawierającymi kolejne lata zostanie scalona do jednej nowej kolumny "year"
+* Dla kolumn "Country Code" oraz "Series Code" nastąpi zmiana ich nazw - odpowiednio "c_code" oraz "s_code"
+* Kolumna zawierająca kody wskaźników ("s_code") zostanie rozszerzona w analizowanym zbiorze danych, tzn. każda wartość wskaźnika stanie się kolumną przechowywującą odpowiednią wartość wskaźnika dla danego kraju i roku
+
+Po wykonaniu tych kroków zbiór danych prezentuje się następująco:
+
+```{r}
+clean_indicators_df <- clean_indicators_df %>%
+  pivot_longer(cols = grep(1970, colnames(clean_indicators_df)):grep(2020, colnames(clean_indicators_df)),
+               names_to = "year", values_to = "value") %>%
+  rename(c_code = "Country Code", s_code = "Series Code") %>%
+  pivot_wider(names_from = s_code, values_from = value)
+
+head(clean_indicators_df[, 1:6])
+```
+
+Z racji tego, że po transformacji wszystkie kolumny są oznaczone jako typ "character" dokonamy zamiany typów dla wszystkich kolumn poza kolumną "c_code" na typ numeryczny.
+
+```{r}
+clean_indicators_df[, 2:ncol(clean_indicators_df)] <- lapply(clean_indicators_df[, 2:ncol(clean_indicators_df)], as.numeric)
+```
+
+### Gold prices
+
+W przypadku zbioru danych zawierającego ceny złota na przestrzeni lat naszym celem będzie transformacja tego zbioru do postaci, dzięki której będziemy mogli połączyć ten zbiór z wcześniej przetwarzanym World Development Indicators. Ostateczny zbiór będzie zawierał następujące kolumny: rok, kurs otwarcia (AM) w dolarach, kurs zamknięcia (PM) w dolarach. Wybrano wydobyć ze zbioru ceny w dolarach w celu zachowania spójności z pozostałymi zbiorami danych. Większość cech w zbiorze World Development Indicators zawiera ceny opisane w dolarach oraz później przetwarzany zbiór danych dotyczący bitcoina także zawiera ceny wyłącznie w dolarach.
+
+Aby przetransformować zbiór do tej postaci należy kolejno:
+
+* Stworzyć nową kolumnę "year", dla której wartości wyekstrahujemy z kolumny "Date"
+* Wyfiltrować interesujące nas przedział lat 1970 - 2020
+* Wyfiltrować wiersze, dla których kurs otwarcia i kurs zamknięcia nie jest wartością pustą
+* Pogrupować po nowo stworzonej kolumnie "year"
+* Jako wartości kursu otwarcia i kursu zamknięcia dla danego przyjmujemy pierwsze wartości w grupie - ostatnie w danym roku (zbiór posortowany według dat malejąco)
+
+```{r}
+gold_prices_by_year_df <- gold_prices_df %>%
+  mutate(year = format(as.Date(gold_prices_df$Date, format = "%Y-%m-%d"), "%Y")) %>%
+  filter(year >= 1970 & year <= 2020) %>%
+  filter(!is.na(USD..AM.) & !is.na(USD..PM.)) %>%
+  group_by(year) %>%
+  summarise(USD_AM = first(USD..AM.), USD_PM = first(USD..PM.))
+```
+
+Dlaczego jako wartości kursu wybieramy pierwsze wartości z grupy, a nie np. średnią czy medianę? Otóż poczynione zostało założenie, że wartości znajdujące się w zbiorze World Development Indicators gromadzone są na stan zakończenia roku kalendarzowego, w związku z czym chcąc zachować spójność między tymi dwoma zbiorami wartości złota zostały wybrane także na stan zakończenia danego roku kalendarzowego.
+
+### S&P Composite
+
+W przypadku zbioru zawierającego dane dotyczące S&P Composite transformacja będzie wyglądała analogicznie jak w przypadku zbioru zawierającego ceny złota. Kolumny, które zostały wybrane z tego zbioru to: "S&P Composite" oraz "CPI", gdyż uznano je za interesujące oraz mogące mieć wpływ na znalezione zależności we właściwym przetwarzaniu.
+
+```{r}
+composite_prices_by_year_df <- composite_prices_df %>%
+  mutate(year = format(as.Date(composite_prices_df$Year, format = "%Y-%m-%d"), "%Y")) %>%
+  filter(year >= 1970 & year <= 2020) %>%
+  group_by(year) %>%
+  summarise(COMPOSITE = first(S.P.Composite), PRICE = first(Real.Price))
+```
+
+### Bitcoin
+
+Kolejno przejdziemy do przetworzenia ostatniego zbioru danych wykorzystanego w analizie, który zawiera dane dotyczące Bitcoina. Ze wszystkich dostarczonych zbiorów danych powiązanych z Bitcoinem zdecydowano się na wykorzystanie danych odnośnie ceny rynkowej Bitcoina mierzonej w dolarach (zbiór "BCHAIN-MKPRU"). Wykorzystano jedynie ten zbiór danych z wszystkich dostarczonych zbiorów, gdyż zawiera informacje najbardziej przystępne dla końcowych odbiorców. Transformacja zbioru wygląda analogicznie jak w przypadku zbiorów S&P Composite oraz Gold prices z tą różnicą, że dla zbioru danych dotyczącego Bitcoina posiadamy jedynie informacje dla lat z przedziału 2009 - 2021, dlatego wartości Bitcoina dla lat 1970 - 2008 zostały uzupełnione wartością 0.
+
+```{r}
+missing_bc_prices_df <- data.frame(year = 1970:2008, BC_PRICE = 0.0)
+bc_prices_by_year_df <- bc_prices_df %>%
+  mutate(year = format(as.Date(bc_prices_df$Date, format = "%Y-%m-%d"), "%Y")) %>%
+  filter(year <= 2020) %>%
+  group_by(year) %>%
+  summarise(BC_PRICE = first(Value)) %>%
+  rbind(missing_bc_prices_df)
+```
+
+
+## Przygotowanie i czyszczenie ostatecznego zbioru danych
+
+Prezentowana sekcja obejmuje Przygotowanie i czyszczenie ostatecznego zbioru danych.
+
+### Połączenie przygotowanych zbiorów danych
+
+W pierwszym kroku połączymy przygotowane wcześniej zbiory danych w jeden wspólny zbiór danych, który posłuży nam do dalszej analizy.
+
+```{r}
+merged_indicators_df <- clean_indicators_df %>%
+  merge(gold_prices_by_year_df, by = "year") %>%
+  merge(bc_prices_by_year_df, by = "year") %>%
+  merge(composite_prices_by_year_df, by = "year")
+```
+
+### Czyszczenie połączonego zbioru danych
+
+Przygotowany w poprzednim punkcie zbiór danych nadal zawiera wiele wartości pustych, którymi zajmiemy się w następnej kolejności.
+
+```{r}
+sort(colSums(is.na(merged_indicators_df)), decreasing = T) %>%
+  kable %>%
+  kable_styling("striped") %>%
+  scroll_box(height = "250px")
+```
+
+&nbsp;
+
+W pierwszym kroku usuniemy kolumny, które zawierają więcej niż 30% wartości pustych. Zdecydowano się na taki krok, ponieważ uznano, że takie kolumny nie przyniosą wartości dodanej dalszej analizie - nie zostaną znalezione interesujące korelacje z wykorzystaniem takich kolumn oraz takie cechy nie będą miały dużego wkładu przy problemie uczenia maszynowego ze względu na istniejące braki.
+
+```{r}
+merged_indicators_df <- merged_indicators_df[, which(colMeans(is.na(merged_indicators_df)) <= 0.3)]
+```
+
+Dla kolumn, które pozostały w zbiorze po filtrowaniu przeprowadzimy operację uzupełnienia wartości pustych zgodnie z przyjętą strategią:
+
+* Wartości puste zostaną uzupełnione średnią dla danego kraju biorąc jedynie pod uwagę rok poprzedni oraz rok następny
+* Wartości puste na krańcach dla danej cechy i dla danego kraju zostaną uzupełnione najbliższymi wartościami niepustymi, przykładowo dla wektora [NA, 2, 5, 7, NA] jego postać po transformacji będzie wyglądała następująco [2, 2, 5, 7, 7]
+
+```{r}
+clean_df <- merged_indicators_df %>%
+  group_by(c_code) %>%
+  mutate_at(vars(-group_cols()), na.approx, na.rm = FALSE, rule = 2) %>%
+  ungroup()
+```
+
+Po wykonaniu tej transformacji otrzymujemy oczyszczony, ostateczny zbiór danych, który wykorzystamy w dalszej analizie.
+
+## Podsumowanie przygotowanego zbioru danych oraz podstawowe statystyki
+
+```{r, echo=FALSE}
+kable(summary(clean_df)) %>%
+  kable_styling("striped") %>%
+  scroll_box(height = "450px")
+```
+
+&nbsp;
+
+Jak możemy zauważyć mimo uzupełnienia wartości pustych to w naszym zbiorze nadal występują cechy, które takie wartości posiadają. Spowodowane jest to tym, że wartości NA dla danej cechy były uzupełniane w obrębie określonego kraju - w sytuacji, gdy dla danego kraju oraz dla danej cechy nie odnotowaliśmy żadnej obserwacji to algorytm uzupełniający wartości puste nie miał na podstawie czego obliczyć pozostałych wartości. Jak możemy zauważyć w wierszu zawierającym wartości puste występują jedynie wielokrotności liczby 51 - wartość ta jest równa liczbie obserwacji dla danego kraju dla danej cechy w latach 1970 - 2020.
+
+```{r}
+dim(clean_df)
+```
+
+Ostatecznie po czyszczeniu i wszystkich transformacjach nasz zbiór danych zawiera 10608 wierszy oraz 59 kolumn.
+
+# Szczegółowa analiza zbioru danych
+
+Prezentowana sekcja obejmuje szczegółową analizę stworzonego w poprzednim punkcie zbioru danych.
+
+## Analiza wartości atrybutów
+
+Z racji, że analizowany zbiór danych zawiera 57 atrybutów opisujących obserwację i analiza każdego atrybutu z osobna zajęłaby znaczną część tego raportu, dlatego zdecydowano się przeanalizować kilka interesujących, wybranych cech:
+
+* Urban population growth (annual %) - SP.URB.GROW
+* Survival to age 65, female (% of cohort) - SP.DYN.TO65.FE.ZS
+* Survival to age 65, male (% of cohort) - SP.DYN.TO65.MA.ZS
+* CO2 emissions (kt) - EN.ATM.CO2E.KT
+
+### Urban population growth (annual %)
+
+```{r, echo=FALSE}
+growth_df <- clean_df %>%
+  select(year, SP.URB.GROW)
+  
+kable(summary(growth_df)) %>% kable_styling(c("striped", "hover"))
+```
+
+&nbsp;
+
+```{r}
+growth_df %>%
+  group_by(year) %>%
+  summarise(growth = mean(SP.URB.GROW, na.rm = T)) %>% 
+  ggplot(aes(year, growth, color = "red")) + geom_point() + geom_line() + theme(legend.position = "none")
+```
+
+```{r}
+growth_df <- growth_df %>%
+  filter(SP.URB.GROW > -10 & SP.URB.GROW < 20)
+
+interval_col <- findInterval(growth_df$year, seq(min(growth_df$year), max(growth_df$year), 10), rightmost.closed = T)
+
+growth_plot <- growth_df %>%
+  cbind(interval_col) %>%
+  ggplot(aes(interval_col, SP.URB.GROW, group = interval_col)) + geom_boxplot()
+
+ggplotly(growth_plot)
+```
+
+Wartości dla każdego roku zostały uśrednione, żeby móc odpowiednio przedstawić je za pomocą wizualizacji.
+
+Jak możemy zauważyć na wykresach wartość wzrostu liczby ludności mieszkającej w miastach (mierzonej w %) notuje tendencję malejącą. Najwyższa wartość wystąpiła w roku 1971 i wyniosła 4,13%, najniższa wartość została odnotowana dla roku 2020 i ostatecznie wyniosła 1,78%. Warto także zwrócić uwagę na przypadek odnotowany w 1975, gdzie wystąpił znaczący spadek - główny wpływ na tę wartość miała tocząca się w tamtych czasach wojna domowa w Kambodży.
+
+Na wykresie pudełkowym obserwacje zostały pogrupowane co 10 lat (1970-1979, 1980-1989, ..., 2010-2020). Jak możemy zwrócić uwagę środkowa linia pudełka - mediana stopniowo spadała rozpoczynając od wartości 3,46 w pierwszej grupie i kończać na wartości 1,71 w ostatniej grupie. Warto także zwrócić uwagę na znaczą liczbę outlierów dla przedostatniej grupy, co świadczy o zanotowanej tendencji wzrostowej w niektórych krajach.
+
+### Survival to age 65
+
+```{r, echo=FALSE}
+survival_df <- clean_df %>%
+  select(year, SP.DYN.TO65.FE.ZS, SP.DYN.TO65.MA.ZS)
+
+kable(summary(survival_df)) %>% kable_styling(c("striped", "hover"))
+```
+
+&nbsp;
+
+```{r}
+survival_df %>%
+  group_by(year) %>%
+  summarise(female = mean(SP.DYN.TO65.FE.ZS, na.rm = T), male = mean(SP.DYN.TO65.MA.ZS, na.rm = T)) %>%
+  pivot_longer(cols = c("female", "male"), names_to = "gender", values_to = "value (%)") %>%
+  ggplot(aes(year, `value (%)`, color = gender)) + geom_point() + geom_line()
+```
+
+Wartości przeżywalności 65 roku życia kobiet i mężczyzn notują tend wzrostowy - w miarę upływu lat przeżywalność wśród kobiet i mężczyzn stopniowo wzrasta. Można także zwrócić uwagę na fakt, że przeżywalność wśród kobiet jest znacząco wyższa niż u mężczyzn, co potwierdza znany fakt, że to kobiety żyją dłużej od mężczyzn. Najniższy pojedynczy, odnotowany % przeżywalności u kobiet wyniósł 6,46% natomiast u mężczyzn było to 1,47%. Mediana w przypadku kobiet wyniosła 71,987%, u mężczyzn 64,691%. Najwyższy pojedynczy odnotowany % u kobiet wyniósł 96,093%, u mężczyzn 92,978%.
+
+### CO2 emissions (kt)
+
+```{r, echo=FALSE}
+emission_df <- clean_df %>%
+  select(year, EN.ATM.CO2E.KT)
+
+kable(summary(emission_df)) %>% kable_styling(c("striped", "hover"))
+```
+
+&nbsp;
+
+```{r}
+emission_df %>%
+  group_by(year) %>%
+  summarise(emission = mean(EN.ATM.CO2E.KT, na.rm = T)) %>% 
+  ggplot(aes(year, emission, color = "red")) + geom_point() + geom_line() + theme(legend.position = "none")
+```
+
+Wartośc emisji CO2 od roku 1970 do roku 2020 notuje tend wzrostowy. Warty odnotowania jest także fakt znaczącego spadku emisji między rokiem 1989 a rokiem 1990. Mediana odnotowana dla tej cechy wyniosła 9153 kiloton, natomiast najwyższa wartość, która została odnotowana wyniosła 34041046 kiloton.
+
+## Badanie korelacji między zmiennymi
+
+W omawianej sekcji przedstawione zostaną wartości współczynnika korelacji Pearsona znalezione w analizowanym zbiorze danych, dla których wartość bezwzględna współczynnika jest większa jak 0,75.
+
+```{r, echo=FALSE}
+cor_matrix <- cor(
+  select(clean_df, -c(c_code, year, USD_AM, USD_PM, COMPOSITE, PRICE, BC_PRICE)),
+  use = "pairwise.complete.obs")
+
+cor_list <- cor_matrix
+
+cor_list[!lower.tri(cor_list)] <- NA
+
+data.frame(cor_list) %>% 
+  rownames_to_column() %>% 
+  gather(key="variable", value="correlation", -rowname) %>% 
+  filter(abs(correlation) > 0.75) %>%
+  arrange(desc(abs(correlation))) %>%
+  kable %>%
+  kable_styling(c("striped", "hover")) %>%
+  scroll_box(height = "450px")
+```
+
+&nbsp;
+
+Jak można było przewidzieć mamy tutaj do czynienia z wieloma korelacjami - z czego większość jest bardzo oczywistych, jak np. Population, female x Population, total czy CO2 emissions from gaseous fuel consumption (kt) x CO2 emissions (kt). Naszym zadaniem jest znalezienie najbardziej interesujących korelacji i jako takie najbardziej interesujące możemy wskazać:
+
+* Life expectancy at birth, total (years) oraz Survival to age 65, male (% of cohort) - wartość współczynnika korelacji Pearsona: 0,988
+* Methane emissions (kt of CO2 equivalent) oraz Number of under-five deaths - wartość współczynnika korelacji Pearsona: 0,852
+* GDP (current US$) oraz Population, total - wartość współczynnika korelacji Pearsona: 0,796
+
+W przypadku pierwszej z korelacji mamy tutaj ciekawą zależność wraz ze wzrostem oczekiwanej długości życia danej osoby przy urodzeniu wzrasta wskaźnik dotyczacy przeżywalności 65 roku życia wśród mężczyzn. Świadczyć to może o nieustannej ewolucji i rozwoju medycyny - wraz z upływem lat metody służące do obliczania oczekiwanej długości życia zostają coraz bardziej dopracowane - dzięki rozwojowi medycznej części świata możliwości człowieka na dłuższe życie zwiększają się, co potwierdza znaleziona w danych korelacja.
+
+Druga ze znalezionych korelacji jest również bardzo ciekawą przesłanką - wraz ze wzrostem emisji metanu wzrasta licba śmierci osób poniżej 5 roku życia. Korelacja ta ma najprawdopodobniej podłoże powiązane z populacją ludzi na świecie.
+
+```{r, echo=FALSE}
+clean_df %>%
+  select(year, SP.POP.TOTL) %>%
+  group_by(year) %>%
+  summarise(sum_population = sum(SP.POP.TOTL)) %>%
+  ggplot(aes(year, sum_population, color = "red")) + geom_point() + geom_line() + theme(legend.position = "none")
+```
+
+Jak możemy zauważyć na prezentowanym wykresie populacja ludzi na świecie notuje wzrost z roku na rok - wraz ze wzrostem populacji wzrasta też liczba śmierci osób poniżej 5 roku życia (naturalna konsekwencja wzrostu urodzeń). Dodatkowo wzrast ze wzrostem populacji wzrasta także emisja metanu - na świecie jest coraz więcej ludzi także również naturalnym wydaje się w tym przypadku wzrost emisji metanu, który jest głównym składnikiem gazu ziemnego.
+
+Trzecia z korelacji jest ciekawym przypadkiem, który potwierdza wpływ wielkości populacji na wartość produktu krajowego brutto. Wraz ze wzrostem liczby ludności w danym kraju, można znaleźć coraz więcej rąk do pracy, co przekłada się na wzrost PKB mierzonego jako łączna wartość wszystkich dóbr i usług wytworzonym w danym kraju w ciągu roku.
+
+Macierz wszystkich wyliczonych korelacji prezentuje się następująco:
+
+```{r, echo=F, fig.width=8, fig.height=8}
+cor_plot <- data.frame(cor_matrix) %>%
+  rownames_to_column() %>%
+  pivot_longer(-rowname, names_to="colname") %>%
+  ggplot(aes(rowname, colname, fill = value)) + 
+  geom_tile() + 
+  scale_fill_gradient2() +
+  theme(axis.text.x = element_text(angle = 90),
+        axis.title.x = element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+ggplotly(cor_plot)
+```
+
+
+### Korelacje między cenami złota
+
+W tej sekcji chcielibyśmy zbadać, które ze zmiennych są najbardziej skorelowane z wcześniej dołączaną do zbioru cechą zawierającą informację odnośnie ceny złota. Z racji, że wartości ceny złota dla każdego kraju są takie same, dlatego w tym przypadku zdecydowano się wybrać 4 kraje (USA, Polska, Indie, RPA), dla których zostaną policzone oraz wyszczególnione korelacje cech z cenami złota.
+
+```{r, echo=FALSE, warning=FALSE}
+get_main_df <- function (country) {
+  clean_df %>%
+    select(-c(year, USD_AM)) %>%
+    filter(c_code == country) %>%
+    select(-c_code)
+}
+
+get_correlation <- function (df) {
+  cor_usa <- cor(
+  select(df, -USD_PM),
+  df$USD_PM,
+  use = "pairwise.complete.obs")
+}
+
+usa_cor <- apply(get_correlation(get_main_df("USA")), 2, sort, decreasing=T)
+pol_cor <- apply(get_correlation(get_main_df("POL")), 2, sort, decreasing=T)
+india_cor <- apply(get_correlation(get_main_df("IND")), 2, sort, decreasing=T)
+rpa_cor <- apply(get_correlation(get_main_df("ZAF")), 2, sort, decreasing=T)
+
+
+cor_df <- data.frame(correlation = head(usa_cor), country = "USA") %>%
+  rbind(data.frame(correlation = head(pol_cor), country = "Poland")) %>%
+  rbind(data.frame(correlation = head(india_cor), country = "Indie")) %>%
+  rbind(data.frame(correlation = head(rpa_cor), country = "RPA")) %>%
+  arrange(desc(correlation))
+
+cor_df %>%
+  kable %>%
+  kable_styling(c("striped", "hover")) %>%
+  scroll_box(height = "450px")
+```
+
+&nbsp;
+
+Jak możemy zauważyć w przypadku Polski, Indii i RPA najsilniejsze korelacje zostały znalezione w odniesieniu do takich cech związanymi z: wartością PKB, eksportem oraz importem dóbr i serwisów. W przypadku USA wyglądało to trochę odmiennie - największą korelację z ceną złota wykazały cechy związane z dochodami netto (Net primary income). W dalszej części postaramy się zweryfikować czy znalezione cechy rzeczywiście będą miały największy wpływ na predykcję cen złota przez stworzony regresor.
+
+## Badanie zmiany wybranych atrybutów w czasie
+
+W tej sekcji zostaną zaprezentowane animacje wykresów prezentujące zmianę wybranych atrybutów w czasie.
+
+
+### S&P Composite
+
+```{r, echo=FALSE, message=FALSE}
+clean_df %>%
+  filter(c_code == "POL") %>%
+  ggplot(aes(year, COMPOSITE, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none") +
+  transition_reveal(year)
+```
+
+### Wartości cen złota
+
+```{r, echo=FALSE, message=FALSE}
+clean_df %>%
+  filter(c_code == "POL") %>%
+  ggplot(aes(year, USD_PM, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none") +
+  transition_reveal(year)
+```
+
+### Procentowy wzrost populacji a procentowy wzrost PKB
+
+```{r, echo=FALSE, message=FALSE}
+clean_df %>%
+  select(year, SP.POP.GROW, NY.GDP.MKTP.KD.ZG) %>%
+  group_by(year) %>%
+  summarise(population_growth = mean(SP.POP.GROW, na.rm = T), gdp_growth = mean(NY.GDP.MKTP.KD.ZG, na.rm = T)) %>%
+  ungroup() %>%
+  pivot_longer(cols = c("population_growth", "gdp_growth"), names_to = "factor", values_to = "value (%)") %>%
+  ggplot(aes(year, `value (%)`, color = factor)) + geom_line() + geom_point() + transition_reveal(year)
+```
+
+Na animacji być może słabo będzie widoczny moment spadku wartości PKB w roku 2020, ale jest to moment, na który warto zwrócić uwagę. Wartość spadła wtedy na około -4%, co ma swoje odzwierciedlenie w globalnym lock-down'ie spowodowanym przez pandemię wywołaną wirusem SARS-CoV-2. Warto także zwrócić uwagę na fakt, że oba te wskaźniki nie są ze sobą skorelowane jakby się mogło wydawać na początku - występują na animacji 4 następujące przypadki:
+
+* Wskaźnik PKB rośnie, wskaźnik populacji maleje
+* Wskaźnik PKB rośnie, wskaźnik populacji rośnie
+* Wskaźnik PKB maleje, wskaźnik populacji maleje
+* Wskaźnik PKB maleje, wskaźnik populacji rośnie
+
+# Problem predykcji cen złota
