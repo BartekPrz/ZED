@@ -24,6 +24,7 @@ library(kableExtra)
 library(zoo)
 library(plotly)
 library(gganimate)
+library(caret)
 ```
 
 # Wstępne przetwarzanie zbioru danych
@@ -127,7 +128,7 @@ Dlaczego jako wartości kursu wybieramy pierwsze wartości z grupy, a nie np. ś
 
 ### S&P Composite
 
-W przypadku zbioru zawierającego dane dotyczące S&P Composite transformacja będzie wyglądała analogicznie jak w przypadku zbioru zawierającego ceny złota. Kolumny, które zostały wybrane z tego zbioru to: "S&P Composite" oraz "CPI", gdyż uznano je za interesujące oraz mogące mieć wpływ na znalezione zależności we właściwym przetwarzaniu.
+W przypadku zbioru zawierającego dane dotyczące S&P Composite transformacja będzie wyglądała analogicznie jak w przypadku zbioru zawierającego ceny złota. Kolumny, które zostały wybrane z tego zbioru to: "S&P Composite" oraz "Real Price", gdyż uznano je za interesujące oraz mogące mieć wpływ na znalezione zależności we właściwym przetwarzaniu.
 
 ```{r}
 composite_prices_by_year_df <- composite_prices_df %>%
@@ -426,8 +427,7 @@ W tej sekcji zostaną zaprezentowane animacje wykresów prezentujące zmianę wy
 ```{r, echo=FALSE, message=FALSE}
 clean_df %>%
   filter(c_code == "POL") %>%
-  ggplot(aes(year, COMPOSITE, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none") +
-  transition_reveal(year)
+  ggplot(aes(year, COMPOSITE, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none")
 ```
 
 ### Wartości cen złota
@@ -435,8 +435,7 @@ clean_df %>%
 ```{r, echo=FALSE, message=FALSE}
 clean_df %>%
   filter(c_code == "POL") %>%
-  ggplot(aes(year, USD_PM, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none") +
-  transition_reveal(year)
+  ggplot(aes(year, USD_PM, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none")
 ```
 
 ### Procentowy wzrost populacji a procentowy wzrost PKB
@@ -448,7 +447,7 @@ clean_df %>%
   summarise(population_growth = mean(SP.POP.GROW, na.rm = T), gdp_growth = mean(NY.GDP.MKTP.KD.ZG, na.rm = T)) %>%
   ungroup() %>%
   pivot_longer(cols = c("population_growth", "gdp_growth"), names_to = "factor", values_to = "value (%)") %>%
-  ggplot(aes(year, `value (%)`, color = factor)) + geom_line() + geom_point() + transition_reveal(year)
+  ggplot(aes(year, `value (%)`, color = factor)) + geom_line() + geom_point()
 ```
 
 Na animacji być może słabo będzie widoczny moment spadku wartości PKB w roku 2020, ale jest to moment, na który warto zwrócić uwagę. Wartość spadła wtedy na około -4%, co ma swoje odzwierciedlenie w globalnym lock-down'ie spowodowanym przez pandemię wywołaną wirusem SARS-CoV-2. Warto także zwrócić uwagę na fakt, że oba te wskaźniki nie są ze sobą skorelowane jakby się mogło wydawać na początku - występują na animacji 4 następujące przypadki:
@@ -459,3 +458,165 @@ Na animacji być może słabo będzie widoczny moment spadku wartości PKB w rok
 * Wskaźnik PKB maleje, wskaźnik populacji rośnie
 
 # Problem predykcji cen złota
+
+W tej sekcji zostanie zaprezentowana próba stworzenia regresora przewidująca ceny złota. Wybrano do predykcji ceny złota ze względu na znacznie większą ilość danych posiadanych (od 1970 do 2020 roku) aniżeli dla Bitcoina, gdzie dane posiadamy dopiero od roku 2009.
+
+## Przewidywanie cen złota z wykorzystaniem zbioru World_Development_Indicators
+
+W pierwszej próbie wykorzystamy wcześniej utworzony i analizowany zbiór danych bazujący głównie na danych ze zbioru World_Development_Indicators. Głównym problemem w tym podejściu jest fakt, że wartości cen złota z dokładności do jednego dnia zostały sprowadzone do jednej wartości na rok. Drugim problemem jest fakt, że dla różnych krajów, ale dla określonego roku ceny złota powtarzają się - globalna cena złota taka sama dla każdego z krajów. W obliczu opisanych problemów możemy zastosować dwa podejścia:
+
+* Przeprowadzenie predykcji dla danych dla wybranego kraju
+* Przeprowadzenie predykcji dla danych dostępnych dla wszystkich krajów
+
+W pierwszym podejściu do procesu predykcji zachowalibyśmy jedynie 52 obserwacje - jest to bardzo mało dla procesu uczenia maszynowego przez co końcowa predykcja mogłaby wypaść bardzo słabo. W związku na przedstawioną wadę pierwszego podejścia zastosujemy do procesu uczenia cały dostępny zbiór danych - z drobnymi wyjątkami, o których mowa w następnej sekcji.
+
+### Przygotowanie zbioru danych do procesu uczenia
+
+W utworzonym przez nas zbiorze danych zostaną poczynione małe modyfikacje, mianowicie - usunięte zostaną kolumny zawierające ceny Bitcoina, S&P Composite oraz Real Price, z tego względu, że tak naprawdę klasyfikator byłby w stanie przewidzieć ceny złota tylko na podstawie tych zmiennych, z tego samego powodu, o którym napisano w poprzedniej sekcji - wartości z całego roku zostały zebrane do jednej wartości i powtarzają się dla danego roku niezależnie od kraju.
+
+```{r}
+train_df <- clean_df %>%
+  select(-c(BC_PRICE, COMPOSITE, PRICE, USD_AM))
+
+train_df <- train_df[complete.cases(train_df),]
+```
+
+### Podział zbioru danych dla procesu uczenia
+
+```{r}
+inTraining <- createDataPartition(y = train_df$USD_PM, p = .75, list = FALSE)
+
+training <- train_df[inTraining,]
+testing <- train_df[-inTraining,] %>%
+  filter(c_code %in% unique(training$c_code))
+```
+
+Pierwsze 75% zbioru trafiło do zbioru treningowego, natomiast pozostała reszta znalazła się w zbiorze testowym. Do podziału zbioru skorzystano ze standardowej metody createDataPartition.
+
+### Proces uczenia z wykorzystaniem algorytmu Random Forest
+
+Jako algorytm predykcyjny zostanie wykorzystanu algorytm Random Forest, który jest absolutnym algorytmem podstawowym, który warto zaaplikować jako pierwszy do swoich danych jako rozwiązanie podstawowe (baseline). W trenowaniu zostanie wykorzystana walidacja krzyżowa z podziałem na 5 części.
+
+```{r}
+rfGrid <- expand.grid(mtry = 20:30)
+gridCtrl <- trainControl(method = "cv", number = 5)
+rfFitTune <- train(USD_PM ~ .,
+                   data = training,
+                   method = "rf",
+                   trControl = gridCtrl,
+                   tuneGrid = rfGrid,
+                   ntree = 50)
+
+rfFitTune
+```
+
+### Predykcja
+
+Predykcja modelu zostanie przebadana pod kątem trzech podstawowych metryk: RMSE, MAE i R^2 szczególnie zwracając uwagę na tę pierwszą metrykę, z tego względu, że RMSE w stosunku do MAE zdecydowanie bardziej zwraca uwagę na wartości odstające (outliery) i przypisuje im większą wartość aniżeli MAE. Z kolei RMSE w stosunku do R^2 zdecydowanie lepiej radzi sobie z wykryciem problemu przeuczenia modelu, czego nie można powiedzieć o metryce R^2.
+
+```{r}
+rfTuneClasses <- predict(rfFitTune, newdata = testing)
+RMSE(rfTuneClasses, testing$USD_PM)
+```
+
+```{r}
+MAE(rfTuneClasses, testing$USD_PM)
+```
+
+```{r}
+rsq <- function(x, y) {
+  cor(x, y) ^ 2
+}
+
+rsq(rfTuneClasses, testing$USD_PM)
+```
+Otrzymane wyniki metryk prezentują się następująco:
+
+* RMSE = 101,6684
+* MAE = 68,04
+* R^2 = 0,953
+
+Na podstawie otrzymanych wyników możemy zauważyć, że otrzymane wyniki nie są najlepsze. Jak możemy zauważyć z otrzymanej wartości R^2 możemy stwierdzić, że 95% zmienności może zostać wyjaśnione przez nasz model. Na podstawie wartości RMSE możemy stwierdzić, że średnia wartość ceny złota między obserwowanymi wartościami danych a przewidywanymi wartościami danych wynosi lekko ponad 100 dolarów.
+
+## Przewidywanie cen złota z pominięciem zbioru World_Development_Indicators
+
+W celu poprawy otrzymanego w poprzedniej sekcji wyniku postanowiono sprawdzić jak nowo stworzony model poradzi sobie z problemem predykcji cen złota. W tym przypadku nie skorzystamy ze zbioru World_Development_Indicators, a naszą predykcję przeprowadzimy w oparciu o pozostałe zbiory danych, gdzie posiadamy dane z szczegółowością do jednego dnia aniżeli do jednego roku. Sprawdzimy w ten sposób czy zapewnienie większej szczegółowości danych wpłynie na lepsze wyniki modelu aniżeli dla przypadku, gdy cech dla danej obserwacji jest znacznie więcej i szczegółowość jest mniejsza.
+
+```{r, echo=FALSE}
+gold_prices_sec_df <- gold_prices_df %>%
+  mutate(Date = as.Date(gold_prices_df$Date, format = "%Y-%m-%d")) %>%
+  select(Date, USD..AM., USD..PM.) %>%
+  rename(USD_AM = USD..AM., USD_PM = USD..PM.)
+
+composite_sec_df <- composite_prices_df %>%
+  mutate(Year = as.Date(composite_prices_df$Year, format = "%Y-%m-%d")) %>%
+  select(Year, S.P.Composite, CPI, Long.Interest.Rate) %>%
+  rename(Date = Year, COMPOSITE = S.P.Composite, RATE = Long.Interest.Rate)
+
+bc_prices_sec_df <- bc_prices_df %>%
+  mutate(Date = as.Date(bc_prices_df$Date, format = "%Y-%m-%d")) %>%
+  rename(BC_PRICE = Value)
+
+train_sec_df <- gold_prices_sec_df %>%
+  merge(bc_prices_sec_df, by = "Date", all.x = T) %>%
+  merge(composite_sec_df, by = "Date", all.x = T) %>%
+  mutate_at(vars(-"Date"), na.approx, na.rm = FALSE, rule = 2)
+  
+```
+
+Przygotowany zbiór danych po połączeniu i uzupełnieniu wartości pustych prezentuje się następująco
+
+```{r, echo = FALSE}
+head(train_sec_df)
+```
+
+### Podział zbioru danych dla procesu uczenia
+
+```{r}
+inTraining_sec <- createDataPartition(y = train_sec_df$USD_PM, p = .75, list = FALSE)
+
+training_sec <- train_sec_df[inTraining_sec,]
+testing_sec <- train_sec_df[-inTraining_sec,]
+```
+
+Pierwsze 75% zbioru trafiło do zbioru treningowego, natomiast pozostała reszta znalazła się w zbiorze testowym. Do podziału zbioru skorzystano ze standardowej metody createDataPartition.
+
+### Proces uczenia z wykorzystaniem algorytmu Random Forest
+
+```{r}
+rfGrid_sec <- expand.grid(mtry = 20:30)
+gridCtrl_sec <- trainControl(method = "cv", number = 5)
+rfFitTune_sec <- train(USD_PM ~ .,
+                   data = training_sec,
+                   method = "rf",
+                   trControl = gridCtrl_sec,
+                   tuneGrid = rfGrid_sec,
+                   ntree = 50)
+
+rfFitTune_sec
+```
+
+### Predykcja
+
+```{r}
+rfTuneClasses_sec <- predict(rfFitTune_sec, newdata = testing_sec)
+RMSE(rfTuneClasses_sec, testing_sec$USD_PM)
+```
+
+```{r}
+MAE(rfTuneClasses_sec, testing_sec$USD_PM)
+```
+
+```{r}
+rsq(rfTuneClasses_sec, testing_sec$USD_PM)
+```
+
+DO POPRAWY
+
+Otrzymane wyniki metryk prezentują się następująco:
+
+* RMSE = 392,7969
+* MAE = 227,7215
+* R^2 = 0,836
+
+Na podstawie otrzymanych wyników możemy stwierdzić, że drugi stworzony przez nas model prezentuje się gorzej aniżeli pierwszy model, co potwierdzają wyniki poszczególnych metryk. Na podstawie RMSE możemy stwierdzić, że średnia wartość ceny złota między obserwowanymi wartościami danych a przewidywanymi wartościami danych wynosi lekko około 400 dolarów. Około 84% zmienności może zostać wyjaśnione przez nasz zbudowany model.
