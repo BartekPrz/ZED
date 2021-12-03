@@ -14,6 +14,24 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Executive Summary
 
+Przeprowadzana analiza w głównej mierze dotyczyła zbioru zawierającego światowe wskaźniki rozwoju zebrane przez organizację Banku Światowego. Dane te obejmują informacje o możliwościach gospodarczych i rozwoju poszczególnych krajów mierzonym przez ponad 100 statystyk. Ponadto do tego zbioru zostały jeszcze dołączone dodatkowe zbiory danych zawierające informacje o kursach wymiany walut, cenach złota, obrocie bitcoinem oraz miesięcznych wynikach S&P Composite.
+
+Pierwszym krokiem po przeczytaniu zbiorów danych było odpowiednie ich przetransformowanie do postaci, która umożliwi sprawne ich połączenie w jeden wspólny zbiór danych. Po tej operacji przystąpiono do czyszczenia danych, usunięcia niektórych cech oraz uzupełnienia wartości pustych.
+
+Następnie skupiono się na szczegółowej analizie wartości atrybutów, gdzie zostały sprawdzone takie cechy jak:
+
+* Urban population growth (annual %) - cecha szczególna: od 1970 roku do dzisiaj notowany trend spadkowy
+* Survival to age 65 - cecha szczególna: stała różnica utrzymująca się przez wszystkie lata między wartośćią dla kobiet aniżeli dla mężczyzn - na korzyść kobiet
+* CO2 emissions (kt) - cecha szczególna: od 1970 roku do dzisiaj notowany trend wzrostowy
+
+W kolejnym kroku przystąpiono do poszukiwania najbardziej interesujących korelacji w zbiorze danych. Większość ze znalezionych korealcji okazała się być oczywista, przykładowo wzrost populacji silnie skorelowany ze wzrostem populacji kobiet. Jednak poza tymi oczywistymi udało się znaleźć też kilka bardziej interesujących jak np. oczekiwana długość życia obliczona przy urodzenia skorelowana z przeżywalnością 65 roku życia wśród mężczyżn lub światowa emisja metanu skorelowana z liczbą śmierci poniżej 5 roku życia. Dodatkowo zostały jeszcze znalezione cechy, które najbardziej korelują z wartością cen złota dla 4 wybranych krajów - w większości przypadków były to cechy związane z wartością PKB, eksportem oraz importem dóbr i usług.
+
+Ostatni etap pracy obejmował próbę stworzenia regresora, którego zadaniem będzie przewidywanie cen złota. Algorytmem, który zdecydowano się zastosować do tego problemu był Random Forest. Wyniki metryk otrzymane na wcześniej przygotowanym wyniosły 94,69 dolarów dla RMSE oraz 96% dla R^2. W celu poprawy wyników zdecydowano powtórzyć eksperyment na zbiorze stworzonym z pominięciem zbioru "World_Development_Indicators". Podejście takie przyniosło bardzo obiecujące wyniki na poziomie 8,57 dolara dla RMSE oraz 99% dla R^2.
+
+Analiza ważności atrybutów jednak wykazała, że za tak optymistyczne wyniki odpowiedzialne było przemieszanie przypadków między zbiorem treningowym a testowym (predykcja danych opartych na aspekcie czasowym). Głównym atrybutem mającym największy udział w predykcji był atrybut daty, podczas gdy pozostałe atrybuty charakteryzowały się bardzo małą lub nawet zerową ważnością. 
+
+W celu poprawy wyników zdecydowano się na zmianę techniki generowania zbioru treningowego oraz testowego. Metryki dla algorytmu Random Forest dla takiej kombinacji wyniosły 530 dolarów dla RMSE oraz 12% dla R^2. Na nowo utworzonym zbiorze danych zdecydowano się także przeprowadzić analizę z wykorzystaniem algorytmu ARIMA. Wyniki otrzymane dla tego algorytmu są lepsze aniżeli dla Random Forest - wartość RMSE wyniosła około 374 dolary.
+
 # Wykorzystane biblioteki
 ```{r libraries, message = FALSE, warning=FALSE}
 library(tidyverse)
@@ -25,16 +43,10 @@ library(zoo)
 library(plotly)
 library(gganimate)
 library(caret)
+library(forecast)
 ```
 
 # Wstępne przetwarzanie zbioru danych
-
-## Zapewnienie powtarzalności wyników
-Aby zapewnić powtarzalność otrzymywanych wyników przy każdym uruchomieniu na dostarczonych danych na samym wstępie określone zostało ziarno przetwarzania jako stała, całkowitoliczbowa wartość.
-
-```{r seed}
-set.seed(42)
-```
 
 ## Odczyt danych
 W ramach analizy został dostarczony główny zbiór danych stworzony przez Bank Światowy, który zawieraja informacje o możliwościach gospodarczych i rozwoju poszczególnych krajów mierzonym przez ponad 100 statystyk. Oprócz tego, w ramach projektu zostały zebrane informacje o kursach wymiany walut, cenach złota, obrocie bitcoinem oraz miesięcznych wynikach S&P Composite.
@@ -350,7 +362,7 @@ clean_df %>%
   select(year, SP.POP.TOTL) %>%
   group_by(year) %>%
   summarise(sum_population = sum(SP.POP.TOTL)) %>%
-  ggplot(aes(year, sum_population, color = "red")) + geom_point() + geom_line() + theme(legend.position = "none")
+  ggplot(aes(year, sum_population, color = "red")) + geom_point() + geom_line() + theme(legend.position = "none") + ylab("Sum population")
 ```
 
 Jak możemy zauważyć na prezentowanym wykresie populacja ludzi na świecie notuje wzrost z roku na rok - wraz ze wzrostem populacji wzrasta też liczba śmierci osób poniżej 5 roku życia (naturalna konsekwencja wzrostu urodzeń). Dodatkowo wzrast ze wzrostem populacji wzrasta także emisja metanu - na świecie jest coraz więcej ludzi także również naturalnym wydaje się w tym przypadku wzrost emisji metanu, który jest głównym składnikiem gazu ziemnego.
@@ -415,7 +427,7 @@ cor_df %>%
 
 &nbsp;
 
-Jak możemy zauważyć w przypadku Polski, Indii i RPA najsilniejsze korelacje zostały znalezione w odniesieniu do takich cech związanymi z: wartością PKB, eksportem oraz importem dóbr i serwisów. W przypadku USA wyglądało to trochę odmiennie - największą korelację z ceną złota wykazały cechy związane z dochodami netto (Net primary income). W dalszej części postaramy się zweryfikować czy znalezione cechy rzeczywiście będą miały największy wpływ na predykcję cen złota przez stworzony regresor.
+Jak możemy zauważyć w przypadku Polski, Indii i RPA najsilniejsze korelacje zostały znalezione w odniesieniu do takich cech związanymi z: wartością PKB, eksportem oraz importem dóbr i usług. W przypadku USA wyglądało to trochę odmiennie - największą korelację z ceną złota wykazały cechy związane z dochodami netto (Net primary income). W dalszej części postaramy się zweryfikować czy znalezione cechy rzeczywiście będą miały największy wpływ na predykcję cen złota przez stworzony regresor.
 
 ## Badanie zmiany wybranych atrybutów w czasie
 
@@ -427,7 +439,7 @@ W tej sekcji zostaną zaprezentowane animacje wykresów prezentujące zmianę wy
 ```{r, echo=FALSE, message=FALSE}
 clean_df %>%
   filter(c_code == "POL") %>%
-  ggplot(aes(year, COMPOSITE, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none")
+  ggplot(aes(year, COMPOSITE, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none") + transition_reveal(year)
 ```
 
 ### Wartości cen złota
@@ -435,7 +447,7 @@ clean_df %>%
 ```{r, echo=FALSE, message=FALSE}
 clean_df %>%
   filter(c_code == "POL") %>%
-  ggplot(aes(year, USD_PM, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none")
+  ggplot(aes(year, USD_PM, color = "blue")) + geom_line() + geom_point() + theme(legend.position = "none") + transition_reveal(year)
 ```
 
 ### Procentowy wzrost populacji a procentowy wzrost PKB
@@ -447,7 +459,7 @@ clean_df %>%
   summarise(population_growth = mean(SP.POP.GROW, na.rm = T), gdp_growth = mean(NY.GDP.MKTP.KD.ZG, na.rm = T)) %>%
   ungroup() %>%
   pivot_longer(cols = c("population_growth", "gdp_growth"), names_to = "factor", values_to = "value (%)") %>%
-  ggplot(aes(year, `value (%)`, color = factor)) + geom_line() + geom_point()
+  ggplot(aes(year, `value (%)`, color = factor)) + geom_line() + geom_point() + transition_reveal(year)
 ```
 
 Na animacji być może słabo będzie widoczny moment spadku wartości PKB w roku 2020, ale jest to moment, na który warto zwrócić uwagę. Wartość spadła wtedy na około -4%, co ma swoje odzwierciedlenie w globalnym lock-down'ie spowodowanym przez pandemię wywołaną wirusem SARS-CoV-2. Warto także zwrócić uwagę na fakt, że oba te wskaźniki nie są ze sobą skorelowane jakby się mogło wydawać na początku - występują na animacji 4 następujące przypadki:
@@ -484,6 +496,7 @@ train_df <- train_df[complete.cases(train_df),]
 ### Podział zbioru danych dla procesu uczenia
 
 ```{r}
+set.seed(42)
 inTraining <- createDataPartition(y = train_df$USD_PM, p = .75, list = FALSE)
 
 training <- train_df[inTraining,]
@@ -500,6 +513,8 @@ Jako algorytm predykcyjny zostanie wykorzystanu algorytm Random Forest, który j
 ```{r}
 rfGrid <- expand.grid(mtry = 20:30)
 gridCtrl <- trainControl(method = "cv", number = 5)
+
+set.seed(42)
 rfFitTune <- train(USD_PM ~ .,
                    data = training,
                    method = "rf",
@@ -530,23 +545,24 @@ rsq <- function(x, y) {
 
 rsq(rfTuneClasses, testing$USD_PM)
 ```
+
 Otrzymane wyniki metryk prezentują się następująco:
 
-* RMSE = 101,6684
-* MAE = 68,04
-* R^2 = 0,953
+* RMSE = 94,695
+* MAE = 64,07
+* R^2 = 0,961
 
-Na podstawie otrzymanych wyników możemy zauważyć, że otrzymane wyniki nie są najlepsze. Jak możemy zauważyć z otrzymanej wartości R^2 możemy stwierdzić, że 95% zmienności może zostać wyjaśnione przez nasz model. Na podstawie wartości RMSE możemy stwierdzić, że średnia wartość ceny złota między obserwowanymi wartościami danych a przewidywanymi wartościami danych wynosi lekko ponad 100 dolarów.
+Jak możemy zauważyć z otrzymanej wartości R^2 możemy stwierdzić, że 96% zmienności może zostać wyjaśnione przez nasz model. Na podstawie wartości RMSE możemy stwierdzić, że średnia wartość ceny złota między obserwowanymi wartościami danych a przewidywanymi wartościami danych wynosi lekko ponad 94 dolary.
 
 ## Przewidywanie cen złota z pominięciem zbioru World_Development_Indicators
 
-W celu poprawy otrzymanego w poprzedniej sekcji wyniku postanowiono sprawdzić jak nowo stworzony model poradzi sobie z problemem predykcji cen złota. W tym przypadku nie skorzystamy ze zbioru World_Development_Indicators, a naszą predykcję przeprowadzimy w oparciu o pozostałe zbiory danych, gdzie posiadamy dane z szczegółowością do jednego dnia aniżeli do jednego roku. Sprawdzimy w ten sposób czy zapewnienie większej szczegółowości danych wpłynie na lepsze wyniki modelu aniżeli dla przypadku, gdy cech dla danej obserwacji jest znacznie więcej i szczegółowość jest mniejsza.
+W celu poprawy otrzymanego w poprzedniej sekcji wyniku postanowiono sprawdzić jak nowo stworzony model poradzi sobie z problemem predykcji cen złota. W tym przypadku nie skorzystamy ze zbioru World_Development_Indicators, a naszą predykcję przeprowadzimy w oparciu o pozostałe zbiory danych, gdzie posiadamy dane z szczegółowością do jednego dnia aniżeli do jednego roku. Sprawdzimy w ten sposób czy zapewnienie większej szczegółowości danych wpłynie na lepsze wyniki modelu aniżeli dla przypadku, gdy cech dla danej obserwacji jest znacznie więcej i szczegółowość czasu jest mniejsza.
 
 ```{r, echo=FALSE}
 gold_prices_sec_df <- gold_prices_df %>%
   mutate(Date = as.Date(gold_prices_df$Date, format = "%Y-%m-%d")) %>%
-  select(Date, USD..AM., USD..PM.) %>%
-  rename(USD_AM = USD..AM., USD_PM = USD..PM.)
+  select(Date, USD..PM.) %>%
+  rename(USD_PM = USD..PM.)
 
 composite_sec_df <- composite_prices_df %>%
   mutate(Year = as.Date(composite_prices_df$Year, format = "%Y-%m-%d")) %>%
@@ -557,9 +573,21 @@ bc_prices_sec_df <- bc_prices_df %>%
   mutate(Date = as.Date(bc_prices_df$Date, format = "%Y-%m-%d")) %>%
   rename(BC_PRICE = Value)
 
+bc_diff_df <- read.csv("Bitcoin/BCHAIN-DIFF.csv")
+bc_diff_df <- bc_diff_df %>%
+  mutate(Date = as.Date(bc_diff_df$Date, format = "%Y-%m-%d")) %>%
+  rename(BC_DIFF = Value)
+
+bc_hrate_df <- read.csv("Bitcoin/BCHAIN-HRATE.csv")
+bc_hrate_df <- bc_hrate_df %>%
+  mutate(Date = as.Date(bc_hrate_df$Date, format = "%Y-%m-%d")) %>%
+  rename(BC_HRATE = Value)
+
 train_sec_df <- gold_prices_sec_df %>%
   merge(bc_prices_sec_df, by = "Date", all.x = T) %>%
   merge(composite_sec_df, by = "Date", all.x = T) %>%
+  merge(bc_diff_df, by = "Date", all.x = T) %>%
+  merge(bc_hrate_df, by = "Date", all.x = T) %>%
   mutate_at(vars(-"Date"), na.approx, na.rm = FALSE, rule = 2)
   
 ```
@@ -573,6 +601,7 @@ head(train_sec_df)
 ### Podział zbioru danych dla procesu uczenia
 
 ```{r}
+set.seed(42)
 inTraining_sec <- createDataPartition(y = train_sec_df$USD_PM, p = .75, list = FALSE)
 
 training_sec <- train_sec_df[inTraining_sec,]
@@ -586,6 +615,8 @@ Pierwsze 75% zbioru trafiło do zbioru treningowego, natomiast pozostała reszta
 ```{r}
 rfGrid_sec <- expand.grid(mtry = 20:30)
 gridCtrl_sec <- trainControl(method = "cv", number = 5)
+
+set.seed(42)
 rfFitTune_sec <- train(USD_PM ~ .,
                    data = training_sec,
                    method = "rf",
@@ -611,12 +642,80 @@ MAE(rfTuneClasses_sec, testing_sec$USD_PM)
 rsq(rfTuneClasses_sec, testing_sec$USD_PM)
 ```
 
-DO POPRAWY
-
 Otrzymane wyniki metryk prezentują się następująco:
 
-* RMSE = 392,7969
-* MAE = 227,7215
-* R^2 = 0,836
+* RMSE = 8,57
+* MAE = 4,49
+* R^2 = 0,999
 
-Na podstawie otrzymanych wyników możemy stwierdzić, że drugi stworzony przez nas model prezentuje się gorzej aniżeli pierwszy model, co potwierdzają wyniki poszczególnych metryk. Na podstawie RMSE możemy stwierdzić, że średnia wartość ceny złota między obserwowanymi wartościami danych a przewidywanymi wartościami danych wynosi lekko około 400 dolarów. Około 84% zmienności może zostać wyjaśnione przez nasz zbudowany model.
+Na podstawie otrzymanych wyników możemy stwierdzić, że drugi stworzony przez nas model prezentuje się lepiej aniżeli pierwszy model, co potwierdzają wyniki poszczególnych metryk. Na podstawie RMSE możemy stwierdzić, że średnia wartość ceny złota między obserwowanymi wartościami danych a przewidywanymi wartościami danych wynosi lekko ponad 8,5 dolara. Około 99% zmienności może zostać wyjaśnione przez nasz zbudowany model - metryka R^2.
+
+## Analiza ważności atrybutów
+
+Analiza ważności atrybutów zostanie przeprowadzona dla najlepszego znalezionego modelu.
+
+```{r}
+varImp(rfFitTune_sec)
+```
+
+Jak możemy zauważyć na podstawie otrzymanych wyników widzimy, że największe znaczenie w procesie predykcji ma data odnotowania wpisu wartości złota, co ciekawe atrybut BC_HRATE nie jest w ogóle brany pod uwagę w procesie predykcji. Warto zwrócić uwagę na fakt, że ważność między datą a drugim atrybutem pod tym względem (CPI) jest ogromna. Skąd może wynikać taka różnica? Mianowicie głównym problemem w tym przypadku jest sposób losowania przykładów do zbioru treningowego i testowego. Mamy tutaj do czynienia z danymi w kontekście czasu - wykorzystana metoda createDataPartition nie zwraca uwagi na kolumnę zawierającą aspekt czasowy tylko dobiera przykłady w ten sposób, aby rozkłady cen złota w zbiorze treningowym i testowym były jak najbardziej podobne, w efekcie czego nastąpiło przemieszanie obserwacji między zbiorami. Przykładowo w zbiorze treningowym znalazły się wpisy z dni 10.10.2020 oraz 12.10.2020, a z zbiorze testowym wpis z dnia 11.10.2020 w efekcie czego model miał bardzo ułatwione zadanie, gdyż znał wartości ceny złota w bliskim okresie od daty obserwacji i mógł sprawnie podać wartość ceny złota na dzień 11.10.2020, która niewiele różniła się od rzeczywistej ceny, gdyż wartości cen złota nie notują bardzo dużych spadków w pojedynczy dzień.
+
+W jaki sposób moglibyśmy sobie poradzić z problemem predykcji wyłącznie za pomocą atrybutu daty? Można by było zastosować inną techniką tworzenia zbioru testowego i zbioru treningowego - mianowicie pierwsze 75% przypadków trafiłoby do zbioru treningowego, a pozostała część do testowego. W ten sposób uniknęlibyśmy zjawiska przemieszania przykładów między zbiorami. Niestety pojawia się jednak kolejny problem, 
+
+```{r, echo=FALSE}
+ggplot(train_sec_df, aes(x=Date, y=USD_PM)) + geom_line()
+```
+
+Jak spojrzymy na wykres cen złota możemy zauważyć, że od około roku 2005 zaczął się szybki wzrost cen złota, który trwał aż do roku około 2013. Przy założeniu, że zbiór treningowy zawierałby 75% całego zbioru to jego ostatnia obserwacja wystąpiłaby w roku 2008. Oznacza to, że w zbiorze testowym znaczna większość obserwacji dotyczyłaby trendów szybkiego wzrostu oraz szybkiego spadku cen, podczas gdy w zbiorze treningowym bardzo rzadko występowały sytuacje szybkich spadków lub wzrostów. Stworzony na takich danych model mógłby sobie po prostu nie poradzić z charakterystyką danych znajdujących się w zbiorze testowym, gdyż uczony był na zupełnie innej charakterystyce. 
+
+W celach porównawczych został stworzony właśnie taki model danych i tak jak się spodziewano otrzymane wyniki były bardzo słabe:
+
+* RMSE = 530,12
+* MAE = 461,46
+* R^2 = 0,12
+
+## Analiza aspektu czasu z wykorzystaniem metody ARIMA
+
+Jako ostatni element naszej analizy sprawdzimy jak poradzi sobie z naszymi danymi dedykowana metoda do analizy szeregów czasowych - ARIMA
+
+### Zbudowanie zbioru treningowego oraz testowego
+
+```{r}
+train_range <- 1:(0.75 * nrow(train_sec_df))
+
+train_arima_ts <- ts(train_sec_df[train_range,])
+test_arima_df <- train_sec_df[-train_range,]
+```
+
+Pierwsze 75% obserwacji trafiło do zbioru treningowego, pozostała częśc trafiła do zbioru testowego.
+
+### Proces uczenia z wykorzystaniem algorytmu ARIMA
+
+```{r}
+set.seed(42)
+arimaFitTune <- auto.arima(train_arima_ts[, 2])
+
+arimaFitTune
+```
+
+### Predykcja
+
+```{r, echo = FALSE}
+plot(forecast(arimaFitTune, h = nrow(test_arima_df)))
+```
+
+```{r, echo = FALSE}
+ggplot(train_sec_df, aes(x=Date, y=USD_PM)) + geom_line()
+```
+
+Tak prezentują się predykowane wartości przez algorytm ARIMA w porównaniu do wartości rzeczywistych cen złota.
+
+```{r}
+accuracy(forecast(arimaFitTune, h = nrow(test_arima_df)), test_arima_df[, 2]) %>%
+  kable %>%
+  kable_styling(c("striped", "hover"))
+```
+
+&nbsp;
+
+Jak możemy zauważyć wyniki otrzymane z wykorzystaniem algorytmu ARIMA dla przedstawionej generacji zbioru treningowego i testowego są lepsze aniżeli przy wykorzystaniu standardowego algorytmu Random Forest. Wartość metryki RMSE spadła o prawie 200 jednostek, wartość metryki MAE spadła o około 170 jednostek. Prowadzi nas to do wniosku, że warto w danych charakteryzujących się przebiegiem czasowym skorzystać z dedykowanych metod do analizy, ponieważ jest duża szansa, że nasze wyniki predykcji ulegną poprawie tak samo jak to się stało w naszym eksperymencie.
